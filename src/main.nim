@@ -524,8 +524,10 @@ judge making cuts.
       args.ytDlpExtras = key
     of "scale":
       args.scale = parseNum(key, expecting)
+      args.scaleSet = true
     of "resolution":
       args.resolution = parseResolution(key, expecting)
+      args.resolutionSet = true
     of "background":
       try: args.background = some(parseColor(key))
       except ValueError as e: error e.msg
@@ -592,9 +594,9 @@ judge making cuts.
     echo listAvailableFilters()
     quit(0)
 
-  # Fail fast on `add` (a CLI-only signal) before any expensive analysis. Using
-  # multiple inputs is gated too, but via the multi-source render/export check in
-  # conductor.editMedia, which also covers timelines imported from a file/stdin.
+  # Fail fast on `add` (a CLI-only signal) before any expensive analysis.
+  # Multiple inputs are handled later by the multi-source render/export policy
+  # in conductor.editMedia, which also covers imported timelines.
   if args.adds.len > 0:
     requireLicense(args, "use the `add` action")
 
