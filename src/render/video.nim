@@ -328,10 +328,9 @@ func scaledVideoResolution*(resolution: (int32, int32),
   )
 
 proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
-    cache: MediaCache = nil):
+    myCache: MediaCache):
     (ptr AVCodecContext, ptr AVStream, iterator(): (ptr AVFrame, int64)) =
 
-  let myCache = if cache != nil: cache else: newMediaCache()
   # One state object per source (decoders, seek bookkeeping, still/held frame
   # caches, loop accounting). Still-image sources (overlay logos/watermarks)
   # decode a single frame that is held for the clip's whole duration in `still`.
@@ -1452,6 +1451,7 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
     if confineMatte != nil: av_frame_free(addr confineMatte)
     sws_free_context(addr scaleCtx)
     sws_free_context(addr reformatCtx)
+    av_frame_free(addr frame)
     av_frame_free(addr lastProcessedFrame)
     av_frame_free(addr nullFrame)
     for _, f in decodedCache:
