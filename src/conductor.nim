@@ -13,16 +13,39 @@ import render/subtitle
 import stats
 
 
-proc parseExportString*(exportStr: string): (string, string, string) =
-  var kind = exportStr
-  var name = "Auto-Editor Media Group"
-  var version = "11"
+func prefixEquals(s, expected: string, stop: int): bool {.raises: [].} =
+  if stop != expected.len:
+    return false
+  for i in 0 ..< stop:
+    if s[i] != expected[i]:
+      return false
+  true
+
+proc parseExportString*(exportStr: string): ExportSpec {.raises: [].} =
+  result.name = "Auto-Editor Media Group"
+  result.version = "11"
 
   let colonPos = exportStr.find(':')
-  if colonPos == -1:
-    return (kind, name, version)
+  let kindEnd = if colonPos == -1: exportStr.len else: colonPos
+  result.kind =
+    if exportStr.prefixEquals("", kindEnd): exAuto
+    elif exportStr.prefixEquals("default", kindEnd): exDefault
+    elif exportStr.prefixEquals("clip-sequence", kindEnd): exClipSequence
+    elif exportStr.prefixEquals("v1", kindEnd): exV1
+    elif exportStr.prefixEquals("v2", kindEnd): exV2
+    elif exportStr.prefixEquals("v3", kindEnd): exV3
+    elif exportStr.prefixEquals("premiere", kindEnd): exPremiere
+    elif exportStr.prefixEquals("resolve-fcp7", kindEnd): exResolveFcp7
+    elif exportStr.prefixEquals("final-cut-pro", kindEnd): exFinalCutPro
+    elif exportStr.prefixEquals("resolve", kindEnd): exResolve
+    elif exportStr.prefixEquals("shotcut", kindEnd): exShotcut
+    elif exportStr.prefixEquals("kdenlive", kindEnd): exKdenlive
+    elif exportStr.prefixEquals("premiere-otio", kindEnd): exPremiereOtio
+    else: error &"Unknown export format: {exportStr[0 ..< kindEnd]}"
 
-  kind = exportStr[0..colonPos-1]
+  if colonPos == -1:
+    return
+
   let paramsStr = exportStr[colonPos+1..^1]
 
   var i = 0
@@ -69,16 +92,15 @@ proc parseExportString*(exportStr: string): (string, string, string) =
         inc i
 
     case paramName:
-      of "name": name = value
-      of "version": version = value
+      of "name": result.name = value
+      of "version": result.version = value
       else: error &"Unknown parameter: {paramName}"
 
     if i < paramsStr.len and paramsStr[i] == ',':
       inc i
 
-  return (kind, name, version)
-
-func normalizeRange(span: (PackedInt, PackedInt), tb: float64, arrayLen: int): (int, int) =
+func normalizeRange(span: (PackedInt, PackedInt), tb: float64,
+    arrayLen: int): (int, int) {.raises: [].} =
   var start = toTb(span[0], tb)
   var stop = toTb(span[1], tb)
   if start < 0:
@@ -88,7 +110,7 @@ func normalizeRange(span: (PackedInt, PackedInt), tb: float64, arrayLen: int): (
   return (start, stop)
 
 proc applyToRange(actionIndex: var seq[int], span: (PackedInt, PackedInt), tb: float64,
-  value: int, maxLen: int) =
+    value: int, maxLen: int) {.raises: [].} =
   let len = if maxLen > 0: maxLen else: actionIndex.len
   let (start, stop) = normalizeRange(span, tb, len)
   if start >= stop:
@@ -99,7 +121,8 @@ proc applyToRange(actionIndex: var seq[int], span: (PackedInt, PackedInt), tb: f
   for i in start ..< min(stop, actionIndex.len):
     actionIndex[i] = value
 
-proc setOutput(userOut, `export`, path: string, isUrl = false): (string, string) =
+proc setOutput(userOut: string, `export`: ExportKind, path: string,
+    isUrl = false): (string, ExportKind) {.raises: [].} =
   var dir, name, ext: string
   if userOut == "" or userOut == "-":
     if path == "":
@@ -117,29 +140,29 @@ proc setOutput(userOut, `export`, path: string, isUrl = false): (string, string)
     ext = (if isUrl or path == "": ".mkv" else: agSplitFile(path).ext)
 
   var myExport = `export`
-  if myExport == "":
+  if myExport == exAuto:
     case ext:
-      of ".xml": myExport = "premiere"
-      of ".fcpxml": myExport = "final-cut-pro"
-      of ".mlt": myExport = "shotcut"
-      of ".kdenlive": myExport = "kdenlive"
-      of ".otio": myExport = "premiere-otio"
-      of ".json", ".v1": myExport = "v1"
-      of ".v2": myExport = "v2"
-      of ".v3": myExport = "v3"
-      else: myExport = "default"
+      of ".xml": myExport = exPremiere
+      of ".fcpxml": myExport = exFinalCutPro
+      of ".mlt": myExport = exShotcut
+      of ".kdenlive": myExport = exKdenlive
+      of ".otio": myExport = exPremiereOtio
+      of ".json", ".v1": myExport = exV1
+      of ".v2": myExport = exV2
+      of ".v3": myExport = exV3
+      else: myExport = exDefault
 
   case myExport:
-    of "premiere", "resolve-fcp7": ext = ".xml"
-    of "final-cut-pro", "resolve": ext = ".fcpxml"
-    of "shotcut": ext = ".mlt"
-    of "kdenlive": ext = ".kdenlive"
-    of "premiere-otio": ext = ".otio"
-    of "v1":
+    of exPremiere, exResolveFcp7: ext = ".xml"
+    of exFinalCutPro, exResolve: ext = ".fcpxml"
+    of exShotcut: ext = ".mlt"
+    of exKdenlive: ext = ".kdenlive"
+    of exPremiereOtio: ext = ".otio"
+    of exV1:
       if ext != ".json":
         ext = ".v1"
-    of "v2": ext = ".v2"
-    of "v3": ext = ".v3"
+    of exV2: ext = ".v2"
+    of exV3: ext = ".v3"
     else: discard
 
   if userOut == "-":
@@ -149,7 +172,8 @@ proc setOutput(userOut, `export`, path: string, isUrl = false): (string, string)
 
   return (&"{root}{ext}", myExport)
 
-func setVideoCodec(inCodec: string, src: MediaInfo, rule: Rules, isUrl = false): string =
+func setVideoCodec(inCodec: string, src: MediaInfo, rule: Rules,
+    isUrl = false): string {.raises: [].} =
   if inCodec != "auto":
     return inCodec
 
@@ -160,7 +184,8 @@ func setVideoCodec(inCodec: string, src: MediaInfo, rule: Rules, isUrl = false):
     return $avcodec_get_name(codecId)
   return $avcodec_get_name(rule.defaultVid)
 
-proc applyAdds(tl: var v3, args: mainArgs, interner: var StringInterner) =
+proc applyAdds(tl: var v3, args: mainArgs,
+    interner: var StringInterner) {.raises: [].} =
   ## Inject `add:` overlays as new video layers. Each spec overlays its source on
   ## every base-layer (v[0]) clip whose section matches the spec's selector
   ## (0 = silent, 1 = normal), spanning the same timeline range. With
@@ -203,13 +228,15 @@ proc applyAdds(tl: var v3, args: mainArgs, interner: var StringInterner) =
     if spec.hasPos:
       acts.add Action(kind: actPos, pxKf: spec.xKf, pyKf: spec.yKf,
         pscaleKf: spec.scaleKf)
-    if spec.effects.len > 0:
-      try:
+    var group = aNil
+    try:
+      if spec.effects.len > 0:
         for a in parseActions(spec.effects):
           acts.add a
-      except ActionParseError as e:
-        error e.msg
-    let group = (if acts.len > 0: newActions(acts) else: aNil)
+      if acts.len > 0:
+        group = newActions(acts)
+    except ActionParseError as e:
+      error e.msg
     var idx = tl.effects.find(group)
     if idx == -1:
       tl.effects.add group
@@ -356,13 +383,16 @@ proc editMedia*(args: var mainArgs) =
           toTb(args.transition, tlV3.tb.float).int64,
           toTb(args.transitionMinCut, tlV3.tb.float).int64)
 
-  var exportKind, tlName, fcpVersion: string
-  if args.`export` == "":
-    (output, exportKind) = setOutput(args.output, "", usePath, args.urlInput)
-    tlName = "Auto-Editor Media Group"
-    fcpVersion = "11"
+  var exportKind: ExportKind
+  var tlName, fcpVersion: string
+  if args.`export`.kind == exAuto:
+    (output, exportKind) = setOutput(args.output, exAuto, usePath, args.urlInput)
+    tlName = args.`export`.name
+    fcpVersion = args.`export`.version
   else:
-    (exportKind, tlName, fcpVersion) = parseExportString(args.`export`)
+    exportKind = args.`export`.kind
+    tlName = args.`export`.name
+    fcpVersion = args.`export`.version
     (output, _) = setOutput(args.output, exportKind, usePath, args.urlInput)
 
   if args.preview:
@@ -374,43 +404,43 @@ proc editMedia*(args: var mainArgs) =
   # can continue at SD resolution. This also covers timelines imported from a
   # file/stdin, which never pass through the CLI-level checks.
   if tlV3.numberOfSrc > 1 and
-      exportKind notin ["default", "clip-sequence"]:
+      exportKind notin {exDefault, exClipSequence}:
     requireLicense(args, "export a timeline with multiple sources")
 
   case exportKind:
-  of "v1", "v2", "v3":
+  of exV1, exV2, exV3:
     exportJsonTl(tlV3, exportKind, output)
     return
-  of "premiere":
+  of exPremiere:
     fcp7WriteXml(tlName, output, false, tlV3)
     return
-  of "resolve-fcp7":
+  of exResolveFcp7:
     # Resolve reads only a file's first audio stream from FCP7 XML
     # (sourcetrack/trackindex is not honored across streams), so split
     # multi-track audio into per-stream wavs like the fcpxml resolve export.
     tlV3.setStreamTo0(interner)
     fcp7WriteXml(tlName, output, true, tlV3)
     return
-  of "final-cut-pro":
+  of exFinalCutPro:
     fcp11WriteXml(tlName, fcpVersion, output, false, tlV3)
     return
-  of "resolve":
+  of exResolve:
     tlV3.setStreamTo0(interner)
     fcp11WriteXml(tlName, fcpVersion, output, true, tlV3)
     return
-  of "shotcut":
+  of exShotcut:
     shotcutWriteMlt(output, tlV3)
     return
-  of "kdenlive":
+  of exKdenlive:
     kdenliveWrite(output, tlV3)
     return
-  of "premiere-otio":
+  of exPremiereOtio:
     otioWrite(tlName, output, tlV3)
     return
-  of "default", "clip-sequence":
+  of exDefault, exClipSequence:
     discard
-  else:
-    error &"Unknown export format: {exportKind}"
+  of exAuto:
+    error "Internal error: unresolved automatic export format"
 
   if output == "-":
     error "Exporting media files to stdout is not supported."
@@ -420,7 +450,7 @@ proc editMedia*(args: var mainArgs) =
   let cache = newMediaCache()
   defer: cache.close()
 
-  if args.`export` == "clip-sequence":
+  if exportKind == exClipSequence:
     if not tlV3.isLinear:
       error "Timeline too complex to use clip-sequence export"
 

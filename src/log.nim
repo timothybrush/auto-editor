@@ -8,17 +8,43 @@ import ./util/[color, rational, term]
 type BarType* = enum
   modern, classic, ascii, machine, none
 
+type
+  ExportKind* = enum
+    exAuto, exDefault, exClipSequence, exV1, exV2, exV3, exPremiere,
+    exResolveFcp7, exFinalCutPro, exResolve, exShotcut, exKdenlive, exPremiereOtio
+
+  ExportSpec* = object
+    kind*: ExportKind
+    name*: string
+    version*: string
+
+func `$`*(kind: ExportKind): string {.raises: [].} =
+  case kind
+  of exAuto: ""
+  of exDefault: "default"
+  of exClipSequence: "clip-sequence"
+  of exV1: "v1"
+  of exV2: "v2"
+  of exV3: "v3"
+  of exPremiere: "premiere"
+  of exResolveFcp7: "resolve-fcp7"
+  of exFinalCutPro: "final-cut-pro"
+  of exResolve: "resolve"
+  of exShotcut: "shotcut"
+  of exKdenlive: "kdenlive"
+  of exPremiereOtio: "premiere-otio"
+
 type PackedInt* = distinct int64
 
-func pack*(flag: bool, number: int64): PackedInt =
+func pack*(flag: bool, number: int64): PackedInt {.raises: [].} =
   let maskedNumber = number and 0x7FFFFFFFFFFFFFFF'i64
   let flagBit = if flag: 0x8000000000000000'i64 else: 0'i64
   PackedInt(flagBit or maskedNumber)
 
-func getFlag*(packed: PackedInt): bool =
+func getFlag*(packed: PackedInt): bool {.raises: [].} =
   int64(packed) < 0
 
-func getNumber*(packed: PackedInt): int64 =
+func getNumber*(packed: PackedInt): int64 {.raises: [].} =
   let raw = int64(packed) and 0x7FFFFFFFFFFFFFFF'i64
   if (raw and 0x4000000000000000'i64) != 0:
     raw or 0x8000000000000000'i64
@@ -69,7 +95,8 @@ type mainArgs* = object
   whenActive*: Actions = aNil
   labeledEdits*: seq[tuple[label: int, expr: string]]
   labeledWhens*: seq[tuple[label: int, action: Actions]]
-  `export`*: string = ""
+  `export`*: ExportSpec = ExportSpec(
+    kind: exAuto, name: "Auto-Editor Media Group", version: "11")
   output*: string = ""
   setAction*: seq[(Actions, PackedInt, PackedInt)]
   adds*: seq[AddSpec]   # `add:` overlays (see AddSpec)
@@ -130,28 +157,34 @@ proc conwrite*(msg: string) {.raises: [].} =
     except IOError:
       discard
 
-proc debug*(msg: string) =
+proc debug*(msg: string) {.raises: [].} =
   if isDebug:
     conwrite ""
-    if noColor:
-      stderr.writeLine(&"Debug: {msg}")
-    else:
-      stderr.styledWriteLine(fgGreen, "Debug: ", resetStyle, msg)
+    try:
+      if noColor:
+        stderr.writeLine(&"Debug: {msg}")
+      else:
+        stderr.styledWriteLine(fgGreen, "Debug: ", resetStyle, msg)
+    except IOError:
+      discard
 
-proc warning*(msg: string) =
+proc warning*(msg: string) {.raises: [].} =
   if not quiet:
     conwrite ""
-    if noColor:
-      stderr.write(&"Warning! {msg}\n")
-    else:
-      stderr.styledWriteLine(fgYellow, "Warning! ", msg, resetStyle)
+    try:
+      if noColor:
+        stderr.write(&"Warning! {msg}\n")
+      else:
+        stderr.styledWriteLine(fgYellow, "Warning! ", msg, resetStyle)
+    except IOError:
+      discard
 
 when defined(windows):
   proc cExit(code: cint) {.importc: "_exit", header: "<stdlib.h>", noreturn.}
 else:
   proc cExit(code: cint) {.importc: "_exit", header: "<unistd.h>", noreturn.}
 
-proc error*(msg: string) {.noreturn.} =
+proc error*(msg: string) {.noreturn, raises: [].} =
   conwrite ""
   try:
     if noColor:
@@ -182,7 +215,7 @@ proc intern*(interner: var StringInterner, s: string): ptr string {.raises: [].}
   result[] = s
   interner[s] = result
 
-proc cleanup*(interner: var StringInterner) =
+proc cleanup*(interner: var StringInterner) {.raises: [].} =
   for ptrStr in interner.values:
     `=destroy`(ptrStr[])
     dealloc(ptrStr)
