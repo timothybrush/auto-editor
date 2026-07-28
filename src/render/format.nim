@@ -3,7 +3,7 @@ from std/math import round
 
 import ../[av, ffmpeg, license, log, media, timeline, throttle]
 import ../util/[bar, rules, rational]
-import ./[video, audio, subtitle, h264, hevc, vp9]
+import ./[video, audio, subtitle, h264, hevc, partialplan, vp9av1]
 
 type Priority = object
   index: float64
@@ -31,7 +31,8 @@ func pngDimensions(data: ptr uint8, size: cint): (cint, cint) =
 proc resolveAudioCodec(layer: seq[Clip], rules: Rules, cache: MediaCache): AVCodecID =
   if layer.len == 0:
     return rules.defaultAud
-  # PCM-first containers (WAV, AIFF, AU, W64, CAF, ...) prefer PCM over the source codec.
+  # PCM-first containers (WAV, AIFF, AU, W64, CAF, ...) prefer PCM over the
+  # source codec.
   if rules.defaultAud.isPCM:
     return rules.defaultAud
 
@@ -85,20 +86,41 @@ proc checkAudioCtx(ctx: ptr AVCodecContext, rate: cint) =
 
   error &"samplerate '{rate}' not allowed for {ctx.codec.name}."
 
-proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rules, bar: Bar,
-    cache: MediaCache) =
+proc makePartialLosslessVideo(output: var OutputContainer, tl: v3, args: mainArgs):
+    tuple[stream: ptr AVStream, packets: iterator(): (ptr AVPacket, int64)] =
+  let encoder = initCodec(args.videoCodec)
+  if encoder == nil:
+    return
+
+  let plan = output.partialLosslessPlan(tl, args, encoder.id)
+  if plan.len == 0:
+    return
+
+  case encoder.id
+  of ID_H264:
+    (result.stream, result.packets) =
+      makePartialLosslessH264(output, tl, args, plan)
+  of ID_HEVC:
+    (result.stream, result.packets) =
+      makePartialLosslessHevc(output, tl, args, plan)
+  of ID_VP9, ID_AV1:
+    (result.stream, result.packets) =
+      makePartialLossless(output, tl, args, plan, encoder.id)
+  else:
+    return
+
+proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rules,
+    bar: Bar, cache: MediaCache) =
   var args = inputArgs
   var renderTl = tl.bakeTransitions()
   var throttle = initThrottle()
   let includeVideo = not args.vn and rules.defaultVid notin [ID_NONE, ID_PNG]
   let includeAudio = not args.an and rules.defaultAud != ID_NONE
   let includeSubtitle = not args.sn and rules.defaultSub != ID_NONE
-  let renderVideo = includeVideo and renderTl.v.len > 0 and
-    renderTl.v[0].len > 0
+  let renderVideo = includeVideo and renderTl.v.len > 0 and renderTl.v[0].len > 0
   if renderVideo:
     var (width, height) = scaledVideoResolution(renderTl.res, args.scale)
-    if renderTl.numberOfSrc > 1 and
-        not fitsFreeMultiSourceResolution(width, height):
+    if renderTl.numberOfSrc > 1 and not fitsFreeMultiSourceResolution(width, height):
       if licenseKeyProvided(args):
         requireLicense(args, "render video with multiple sources above 720x576")
       else:
@@ -157,33 +179,21 @@ proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rule
 
   var vEncCtx: ptr AVCodecContext = nil
   var vOutStream: ptr AVStream = nil
-  var videoFrameIter: iterator(): (ptr AVFrame, int64) = iterator(): (ptr AVFrame, int64) =
-    return
-  var videoPacketIter: iterator(): (ptr AVPacket, int64) = iterator(): (ptr AVPacket, int64) =
-    return
+  var videoFrameIter: iterator(): (ptr AVFrame, int64) =
+    iterator(): (ptr AVFrame, int64) =
+      return
+  var videoPacketIter: iterator(): (ptr AVPacket, int64) =
+    iterator(): (ptr AVPacket, int64) =
+      return
   var partialLosslessVideo = false
 
   if renderVideo:
-    let h264Plan = output.partialLosslessH264Plan(renderTl, args)
-    if h264Plan.len > 0:
-      partialLosslessVideo = true
-      (vOutStream, videoPacketIter) = makePartialLosslessH264(
-        output, renderTl, args, h264Plan)
-    else:
-      let hevcPlan = output.partialLosslessHevcPlan(renderTl, args)
-      if hevcPlan.len > 0:
-        partialLosslessVideo = true
-        (vOutStream, videoPacketIter) = makePartialLosslessHevc(
-          output, renderTl, args, hevcPlan)
-      else:
-        let vp9Plan = output.partialLosslessVp9Plan(renderTl, args)
-        if vp9Plan.len > 0:
-          partialLosslessVideo = true
-          (vOutStream, videoPacketIter) = makePartialLosslessVp9(
-            output, renderTl, args, vp9Plan)
-        else:
-          (vEncCtx, vOutStream, videoFrameIter) = makeNewVideoFrames(
-            output, renderTl, args, cache)
+    (vOutStream, videoPacketIter) =
+      output.makePartialLosslessVideo(renderTl, args)
+    partialLosslessVideo = vOutStream != nil
+    if not partialLosslessVideo:
+      (vEncCtx, vOutStream, videoFrameIter) =
+        makeNewVideoFrames(output, renderTl, args, cache)
 
   var audioStreams: seq[ptr AVStream] = @[]
   var audioEncoders: seq[ptr AVCodecContext] = @[]
@@ -223,8 +233,8 @@ proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rule
       audioEncoders.add(aEncCtx)
 
       let frameSize = if aEncCtx.frame_size > 0: aEncCtx.frame_size else: 1024
-      let audioFrameIter = makeMixedAudioFrames(encoder.sample_fmts[0], renderTl, frameSize,
-          args.audioNormalize, cache)
+      let audioFrameIter = makeMixedAudioFrames(encoder.sample_fmts[0], renderTl,
+          frameSize, args.audioNormalize, cache)
       audioFrameIters.add(audioFrameIter)
   elif includeAudio:
     # Create separate streams for each timeline layer
@@ -234,7 +244,8 @@ proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rule
         var (aOutStream, aEncCtx) = output.addStream(audCodec, rate = rate,
             lang = tl.langs[tl.v.len + i], layout = tl.layout)
         checkAudioCtx(aEncCtx, tl.sr)
-        # avcodec_open2 configures the encoder from bit_rate; set after and it's ignored.
+        # avcodec_open2 configures the encoder from bit_rate; setting it after
+        # the call has no effect.
         if args.audioBitrate >= 0:
           aEncCtx.bit_rate = args.audioBitrate
         resolveEncoderContext(aEncCtx)
@@ -255,8 +266,8 @@ proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rule
         audioEncoders.add(aEncCtx)
 
         let frameSize = if aEncCtx.frame_size > 0: aEncCtx.frame_size else: 1024
-        let audioFrameIter = makeNewAudioFrames(encoder.sample_fmts[0], i.int32, renderTl,
-            frameSize, args.audioNormalize, cache)
+        let audioFrameIter = makeNewAudioFrames(encoder.sample_fmts[0], i.int32,
+            renderTl, frameSize, args.audioNormalize, cache)
         audioFrameIters.add(audioFrameIter)
 
   defer:
@@ -357,9 +368,7 @@ proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rule
   var encoderTitles: seq[string] = @[]
 
   if vOutStream != nil:
-    let name =
-      if vEncCtx != nil: vEncCtx.codec.canonicalName
-      else: vOutStream.name()
+    let name = if vEncCtx != nil: vEncCtx.codec.canonicalName else: vOutStream.name()
     if name != "":
       encoderTitles.add (if noColor: name else: &"\e[95m{name}")
   for aEncCtx in audioEncoders:
@@ -430,7 +439,8 @@ proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rule
       elif shouldGetAudio[i]:
         (audioFrames[i], _) = audioFrameIters[i]()
         if audioFrames[i] != nil:
-          let audioIndex = int(round(audioFrames[i].time(audioEncoders[i].time_base) * tl.tb))
+          let audioIndex = int(round(
+            audioFrames[i].time(audioEncoders[i].time_base) * tl.tb))
           # Update index to the maximum of video and audio indices to ensure progress
           index = max(index, audioIndex)
 
@@ -446,8 +456,10 @@ proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rule
     # Add audio frames to queue
     for i in 0..<audioFrameIters.len:
       if shouldGetAudio[i] and audioFrames[i] != nil:
-        let audioIndex = int(round(audioFrames[i].time(audioEncoders[i].time_base) * tl.tb))
-        frameQueue.push(Priority(index: float(audioIndex), frame: audioFrames[i], stream: audioStreams[i]))
+        let audioIndex = int(round(
+          audioFrames[i].time(audioEncoders[i].time_base) * tl.tb))
+        frameQueue.push(Priority(index: float(audioIndex), frame: audioFrames[i],
+            stream: audioStreams[i]))
 
     while frameQueue.len > 0 and frameQueue[0].index <= float64(index):
       let item = frameQueue.pop()
@@ -464,15 +476,16 @@ proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rule
         av_packet_free(addr ownedPacket)
         continue
       let frameType = outputStream.codecpar.codec_type
-      let encCtx = if frameType == AVMEDIA_TYPE_VIDEO:
-        vEncCtx
-      else:
-        var aEncCtx: ptr AVCodecContext = nil
-        for i, stream in audioStreams:
-          if stream == outputStream:
-            aEncCtx = audioEncoders[i]
-            break
-        aEncCtx
+      let encCtx =
+        if frameType == AVMEDIA_TYPE_VIDEO:
+          vEncCtx
+        else:
+          var aEncCtx: ptr AVCodecContext = nil
+          for i, stream in audioStreams:
+            if stream == outputStream:
+              aEncCtx = audioEncoders[i]
+              break
+          aEncCtx
 
       for outPacket in encCtx.encode(frame, outPacket):
         outPacket.stream_index = outputStream.index
