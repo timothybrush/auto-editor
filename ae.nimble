@@ -376,6 +376,8 @@ proc cmakeBuild(package: Package, buildPath: string, kind: CrossKind) =
     cmakeArgs.add(&"-DCMAKE_CXX_FLAGS=-ffile-prefix-map={sourceDir}/=")
 
   if package.name == "libsvtav1":
+    if defined(macosx) and hostCPU == "amd64" and kind == native:
+      cmakeArgs.add("-DENABLE_AVX512=OFF")
     # SVT-AV1's CMakeLists writes archives into the source tree at
     # Bin/${CMAKE_BUILD_TYPE}/. Override the CACHE PATH so the .a stays in
     # the build dir and re-installs don't produce a hybrid BSD/GNU archive.
@@ -569,6 +571,10 @@ proc x265Build(buildPath: string, kind: CrossKind) =
   let isWasm = kind == wasm32 or kind == wasm64
   let cmakePrefix = if isWasm: "emcmake cmake" else: "cmake"
   let memArg = if kind == wasm64: " -m64" else: ""
+  let parallelJobs =
+    when defined(macosx): gorge("sysctl -n hw.ncpu").strip
+    elif defined(linux): gorge("nproc").strip
+    else: "4"
 
   let sourceDir = absolutePath("source")
   let pkgDir = buildPath / "pkg"
@@ -616,7 +622,7 @@ proc x265Build(buildPath: string, kind: CrossKind) =
   let cmake10Cmd = cmakePrefix & " " & cmake10Args.join(" ")
   echo "RUN: ", cmake10Cmd
   exec cmake10Cmd
-  exec &"cmake --build {dir10bit}"
+  exec &"cmake --build {dir10bit} --parallel {parallelJobs}"
   exec &"mv {dir10bit}/libx265.a {dir10bit}/libx265_main10.a"
 
   # Build 8-bit version with linked 10-bit
@@ -642,7 +648,7 @@ proc x265Build(buildPath: string, kind: CrossKind) =
 
   echo "RUN: ", cmake8Cmd
   exec cmake8Cmd
-  exec &"cmake --build {dir8bit}"
+  exec &"cmake --build {dir8bit} --parallel {parallelJobs}"
 
   # Manually combine libraries for multi-bit-depth support
   echo "Combining x265 libraries for multi-bit-depth support..."
