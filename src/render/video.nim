@@ -190,6 +190,8 @@ proc reformat*(frame: ptr AVFrame, format: AVPixelFormat, width: cint = 0,
       ownedCtx = sws_alloc_context()
       if ownedCtx == nil:
         error "Failed to allocate sws context"
+      # sws_alloc_context defaults to a single thread.
+      discard av_opt_set_int(ownedCtx, "threads", 0, 0)
       ownedCtx
 
   ret = sws_scale_frame(swsCtx, newFrame, frame)
@@ -299,6 +301,7 @@ proc scaleWithPad(src: ptr AVFrame, targetW, targetH: int32,
     av_frame_free(addr scaled)
     av_frame_free(addr output)
     error "Could not allocate sws context in scaleWithPad"
+  discard av_opt_set_int(swsCtx, "threads", 0, 0)
   let scaleRet = sws_scale_frame(swsCtx, scaled, src)
   sws_free_context(addr swsCtx)
   if scaleRet < 0:
@@ -528,6 +531,13 @@ proc makeNewVideoFrames*(output: var OutputContainer, tl: v3, args: mainArgs,
     discard av_opt_set_int(encoderCtx.priv_data, "crf", args.crf.cint, 0)
   if args.preset != "":
     discard av_opt_set(encoderCtx.priv_data, "preset", cstring(args.preset), 0)
+
+  if args.gop >= 1:
+    encoderCtx.gop_size = args.gop.cint
+  elif args.fragmented and not args.noFragmented:
+    # frag_keyframe only cuts a fragment at a keyframe, so the default keyint
+    # would hold back the first fragment for seconds of media.
+    encoderCtx.gop_size = max(1, int(round(tl.tb.float))).cint
 
   encoderCtx.open()
   pix_fmt = encoderCtx.pix_fmt
