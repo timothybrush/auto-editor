@@ -141,7 +141,7 @@ proc applyToRange(actionIndex: var seq[int], span: (PackedInt, PackedInt), tb: f
     actionIndex[i] = value
 
 proc setOutput(userOut: string, `export`: ExportKind, path: string,
-    isUrl = false): (string, ExportKind) {.raises: [].} =
+    isUrl = false, hasVideo = false): (string, ExportKind) {.raises: [].} =
   var dir, name, ext: string
   if userOut == "" or userOut == "-":
     if path == "":
@@ -183,6 +183,17 @@ proc setOutput(userOut: string, `export`: ExportKind, path: string,
     of exV2: ext = ".v2"
     of exV3: ext = ".v3"
     else: discard
+
+  # A timeline with video needs a container that can hold it. The default name
+  # copies the input's extension, so an audio-only input that gained a video
+  # layer (`song.mp3 -w:1 add:...`) would land in an .mp3 and lose the video
+  # without a word. Pick mp4 instead; if the name came from the user, keep it
+  # and say what is being dropped rather than overriding their choice.
+  if hasVideo and myExport == exDefault and not holdsVideo("x" & ext):
+    if userOut != "" and userOut != "-" and agSplitFile(userOut).ext != "":
+      warning &"{ext} can't hold a video stream; it will be dropped"
+    else:
+      ext = ".mp4"
 
   if userOut == "-":
     return ("-", myExport)
@@ -240,7 +251,9 @@ proc applyAdds(tl: var v3, args: mainArgs,
     tl.v.add base
 
   for spec in args.adds:
-    let srcPtr = interner.intern(spec.path)
+    # A generator layer has no source: the renderer hands it a transparent
+    # canvas that its own action paints, which then composites over the picture.
+    let srcPtr = (if spec.generator.len > 0: nil else: interner.intern(spec.path))
     # The overlay's effects group: an optional `pos` placement action followed by
     # any actions chained after `add:` (which apply to this layer, not the base).
     var acts: seq[Action]
@@ -249,6 +262,9 @@ proc applyAdds(tl: var v3, args: mainArgs,
         pscaleKf: spec.scaleKf)
     var group = aNil
     try:
+      if spec.generator.len > 0:
+        # Ahead of the chained actions, so those operate on the drawn confetti.
+        acts.add parseAction(spec.generator)
       if spec.effects.len > 0:
         block:
           let parsed = parseActions(spec.effects)
@@ -338,10 +354,10 @@ proc editMedia*(args: var mainArgs) =
         let minclip = toTb(args.smooth[1], tbf)
 
         # Margin and smoothing act on the binary keep/cut boundary (active = any
-        # non-silent label). Run them on that mask, then fold the result back into
-        # the labels: where margin/mincut turned silence active, call it label 1
-        # (normal); where minclip cut a short active clip, set it silent (0). With
-        # only labels 0/1 present this reproduces the previous behavior exactly.
+        # non-silent label). Run them on that mask, then fold the result back into the
+        # labels: where margin/mincut turned silence active, call it label 1 (normal);
+        # where minclip cut a short active clip, set it silent (0). Labels 0/1 alone
+        # round-trip through this mask unchanged.
         var active = newSeq[bool](labels.len)
         for i in 0 ..< labels.len:
           active[i] = labels[i] != 0'u8
@@ -412,15 +428,18 @@ proc editMedia*(args: var mainArgs) =
 
   var exportKind: ExportKind
   var tlName, fcpVersion: string
+  let hasVideo = tlV3.v.len > 0 and not args.vn
   if args.`export`.kind == exAuto:
-    (output, exportKind) = setOutput(args.output, exAuto, usePath, args.urlInput)
+    (output, exportKind) = setOutput(args.output, exAuto, usePath, args.urlInput,
+      hasVideo)
     tlName = args.`export`.name
     fcpVersion = args.`export`.version
   else:
     exportKind = args.`export`.kind
     tlName = args.`export`.name
     fcpVersion = args.`export`.version
-    (output, _) = setOutput(args.output, exportKind, usePath, args.urlInput)
+    (output, _) = setOutput(args.output, exportKind, usePath, args.urlInput,
+      hasVideo)
 
   if args.preview:
     preview(tlV3)
