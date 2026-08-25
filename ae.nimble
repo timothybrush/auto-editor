@@ -179,8 +179,8 @@ let opus = Package(
 )
 let vpx = Package(
   name: "libvpx",
-  sourceUrl: "https://github.com/webmproject/libvpx/archive/refs/tags/v1.16.0.tar.gz",
-  sha256: "7a479a3c66b9f5d5542a4c6a1b7d3768a983b1e5c14c60a9396edc9b649e015c",
+  sourceUrl: "https://github.com/webmproject/libvpx/archive/refs/tags/v1.17.0.tar.gz",
+  sha256: "1020f184046187baa2985dbde38e0691f49c44088bca7a1842b0236c6081dc0a",
   buildArguments: (
     "--disable-dependency-tracking --disable-examples --disable-unit-tests " &
     (when defined(macosx) and hostCPU == "amd64": "--disable-avx512 " else: "") &
@@ -276,7 +276,7 @@ func location(package: Package): string =
 
 func dirName(package: Package): string =
   if package.name == "libvpx":
-    return "libvpx-1.16.0"
+    return "libvpx-1.17.0"
   if package.name == "libvpl":
     return "libvpl-2.16.0"
   if package.name == "nv-codec-headers":
