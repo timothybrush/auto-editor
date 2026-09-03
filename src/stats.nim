@@ -1,10 +1,10 @@
 import std/[sets, strutils, strformat]
 from std/math import round
-import csort
 
 import ./[action, av, ffmpeg, log, timeline]
 import ./util/[fun, rational]
 import ./lib/cliputil
+import ./vendor/csort/csort
 
 type f64 = float64
 
