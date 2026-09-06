@@ -177,26 +177,35 @@ proc findSoftwareDecoder(codecId: AVCodecID): ptr AVCodec =
       return avcodec_find_decoder_by_name("libvpx-vp9")
   return avcodec_find_decoder(codecId)
 
-proc initDecoder*(codecpar: ptr AVCodecParameters): ptr AVCodecContext =
-  var codec: ptr AVCodec
+proc findDecoder*(codecId: AVCodecID): ptr AVCodec =
+  ## The decoder `initDecoder` would open for `codecId`, or nil when this build
+  ## has none. Some codecs FFmpeg demuxes have no decoder at all: Apple's
+  ## Positional Audio Codec (the `apac` track in Spatial Audio recordings) is
+  ## demuxed and tagged, but libavcodec ships nothing that can decode it.
   when defined(emscripten):
     if useWebCodecs:
-      if codecpar.codec_id == ID_H264:
-        codec = avcodec_find_decoder_by_name("h264_webcodecs")
-      elif codecpar.codec_id == ID_AAC:
-        codec = avcodec_find_decoder_by_name("aac_webcodecs")
-      elif codecpar.codec_id == ID_AV1:
-        codec = avcodec_find_decoder_by_name("av1_webcodecs")
-      elif codecpar.codec_id == ID_VP8:
-        codec = avcodec_find_decoder_by_name("vp8_webcodecs")
-      elif codecpar.codec_id == ID_VP9:
-        codec = avcodec_find_decoder_by_name("vp9_webcodecs")
-      elif codecpar.codec_id == ID_HEVC:
-        codec = avcodec_find_decoder_by_name("hevc_webcodecs")
+      if codecId == ID_H264:
+        result = avcodec_find_decoder_by_name("h264_webcodecs")
+      elif codecId == ID_AAC:
+        result = avcodec_find_decoder_by_name("aac_webcodecs")
+      elif codecId == ID_AV1:
+        result = avcodec_find_decoder_by_name("av1_webcodecs")
+      elif codecId == ID_VP8:
+        result = avcodec_find_decoder_by_name("vp8_webcodecs")
+      elif codecId == ID_VP9:
+        result = avcodec_find_decoder_by_name("vp9_webcodecs")
+      elif codecId == ID_HEVC:
+        result = avcodec_find_decoder_by_name("hevc_webcodecs")
+  if result == nil:
+    result = findSoftwareDecoder(codecId)
+
+proc canDecode*(codecId: AVCodecID): bool =
+  findDecoder(codecId) != nil
+
+proc initDecoder*(codecpar: ptr AVCodecParameters): ptr AVCodecContext =
+  var codec = findDecoder(codecpar.codec_id)
   if codec == nil:
-    codec = findSoftwareDecoder(codecpar.codec_id)
-  if codec == nil:
-    error "Decoder not found"
+    error &"Decoder not found: {avcodec_get_name(codecpar.codec_id)}"
 
   result = avcodec_alloc_context3(codec)
   if result == nil:
