@@ -1,4 +1,4 @@
-import std/[options, os, sets, tables]
+import std/[options, os, sets, strformat, tables]
 from std/math import round, ceil
 
 import ./[action, av, ffmpeg, media, log, wavutil]
@@ -110,6 +110,12 @@ proc chunkify(arr: seq[int], effects: seq[Actions]): seq[(int64, int64, int, Act
     inc j
   result.add (start, arr.len.int64, arr[j-1], effects[arr[j - 1]])
 
+proc decodableAudio(mi: MediaInfo): seq[int] =
+  for i in 0 ..< mi.a.len:
+    if canDecode(mi.a[i].codecId):
+      result.add i
+    else:
+      warning &"Skipping audio stream {i}: no decoder for {avcodec_get_name(mi.a[i].codecId)}"
 
 proc mutHelper(tl: var v3, mi: MediaInfo, clips: seq[Clip]) =
   if mi.v.len > 0:
@@ -121,7 +127,9 @@ proc mutHelper(tl: var v3, mi: MediaInfo, clips: seq[Clip]) =
     tl.v.add vlayer
     tl.langs.add mi.v[0].lang
 
-  for i in 0 ..< mi.a.len:
+  let audioStreams = mi.decodableAudio
+
+  for i in audioStreams:
     var alayer = newSeqOfCap[Clip](clips.len)
     for clip in clips:
       var audioClip = clip
@@ -141,9 +149,9 @@ proc mutHelper(tl: var v3, mi: MediaInfo, clips: seq[Clip]) =
   if tl.timelineIsEmpty:
     error "Timeline is empty, nothing to do."
 
-  if mi.a.len > 0:
-    tl.sr = mi.a[0].sampleRate
-    tl.layout = initLayout(mi.a[0].layout)
+  if audioStreams.len > 0:
+    tl.sr = mi.a[audioStreams[0]].sampleRate
+    tl.layout = initLayout(mi.a[audioStreams[0]].layout)
   else:
     tl.sr = 48000
     tl.layout = initLayout("stereo")
@@ -203,14 +211,16 @@ proc appendLinearTimeline*(tl: var v3, src: ptr string, mi: MediaInfo,
       videoClip.stream = 0
       tl.v[0].add videoClip
 
-  for i in 0 ..< mi.a.len:
-    if tl.a.len <= i:
+  var layerIdx = 0
+  for i in mi.decodableAudio:  # warns once per appended source
+    if tl.a.len <= layerIdx:
       tl.a.add @[]
       tl.langs.add mi.a[i].lang
     for clip in clips:
       var audioClip = clip
       audioClip.stream = i.int16
-      tl.a[i].add audioClip
+      tl.a[layerIdx].add audioClip
+    inc layerIdx
 
   for i in 0 ..< mi.s.len:
     while tl.s.len <= i:

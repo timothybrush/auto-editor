@@ -307,13 +307,24 @@ proc interpretEdit*(args: mainArgs, container: InputContainer, input: string,
 
         if stream == -1:
           var matched = false
+          var undecodable = 0
           for i in 0 ..< container.audio.len:
+            let codecId = container.audio[i].codecpar.codec_id
+            if not canDecode(codecId):
+              inc undecodable
+              # Analyzing "all" streams shouldn't fail on a track no decoder
+              # can read, like the `apac` one in iPhone Spatial Audio files.
+              debug &"audio: skipping stream {i}, no decoder for " &
+                $avcodec_get_name(codecId)
+              continue
             let channelIndex = streamChannel(i.int16)
             if channelIndex >= -1:
               result.orWithThreshold(
                 audio(bar, container, input, tb, i.int16, channelIndex), threshold)
               matched = true
           if not matched:
+            if undecodable > 0 and undecodable == container.audio.len:
+              error "audio: no audio stream in this file can be decoded."
             error &"audio: channel '{channel}' does not exist in any audio stream."
         else:
           if stream >= container.audio.len:
