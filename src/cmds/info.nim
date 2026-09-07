@@ -124,7 +124,7 @@ proc printYamlInfo(fileInfo: MediaInfo) =
   echo &"   - bitrate: {fileInfo.bitrate}"
 
 
-func getJsonInfo(fileInfo: MediaInfo): JsonNode =
+proc getJsonInfo(fileInfo: MediaInfo): JsonNode =
   var varr, aarr, sarr, iarr: seq[JsonNode] = @[]
   var tb = AVRational(num: 30, den: 1)
   if fileInfo.v.len > 0:
@@ -152,9 +152,12 @@ func getJsonInfo(fileInfo: MediaInfo): JsonNode =
     })
 
   for a in fileInfo.a:
+    # `decodable` is this build's answer, not the format's: a container can name
+    # a codec nothing here can read (Apple's `apac` Spatial Audio track), and a
+    # caller planning work per stream needs to know before it asks.
     aarr.add( %* {"codec": $avcodec_get_name(a.codecId), "layout": a.layout,
         "samplerate": a.sampleRate, "duration": a.duration,
-        "bitrate": a.bitrate, "lang": a.lang})
+        "bitrate": a.bitrate, "lang": a.lang, "decodable": canDecode(a.codecId)})
 
   for s in fileInfo.s:
     sarr.add( %* s)

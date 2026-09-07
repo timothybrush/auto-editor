@@ -1,4 +1,4 @@
-import std/[heapqueue, options, sequtils, strformat, strutils]
+import std/[heapqueue, options, sequtils, sets, strformat, strutils]
 from std/math import round
 
 import ../[action, av, ffmpeg, license, log, media, timeline, throttle]
@@ -102,9 +102,38 @@ proc makePartialLosslessVideo(output: var OutputContainer, tl: v3, args: mainArg
   (result.stream, result.packets) =
     makePartialLossless(output, tl, args, plan, encoder.id)
 
+proc dropUndecodableAudio(tl: var v3, cache: MediaCache) =
+  ## A timeline can name an audio stream this build has no decoder for: the
+  ## `apac` track in an iPhone Spatial Audio recording, say. The CLI drops those
+  ## layers as it builds a timeline, but a v3 written elsewhere (the app builds
+  ## its own) arrives with them intact, so drop the clips here too rather than
+  ## failing the whole render. The layer is emptied, never removed, so the seqs
+  ## indexed alongside it -- `langs`, `at` -- stay aligned.
+  var reported: HashSet[(ptr string, int16)]
+  for layer in tl.a.mitems:
+    var kept = newSeqOfCap[Clip](layer.len)
+    for clip in layer:
+      if clip.src == nil:
+        kept.add clip
+        continue
+      let container = cache.getContainer(clip.src)
+      if clip.stream.int >= container.audio.len:
+        kept.add clip
+        continue
+      let codecId = container.audio[clip.stream.int].codecpar.codec_id
+      if canDecode(codecId):
+        kept.add clip
+      elif not reported.containsOrIncl((clip.src, clip.stream)):
+        warning &"Skipping audio stream {clip.stream}: no decoder for " &
+          $avcodec_get_name(codecId)
+    layer = kept
+
 proc makeMedia*(inputArgs: mainArgs, tl: var v3, outputPath: string, rules: Rules,
     bar: Bar, cache: MediaCache) =
   var args = inputArgs
+  # Before bakeTransitions: output streams are created from `tl` and their
+  # frames come from the baked copy, so both must see the same audio layers.
+  tl.dropUndecodableAudio(cache)
   let sourceEffectCount = tl.effects.len
   var renderTl = tl.bakeTransitions()
   defer:

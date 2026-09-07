@@ -212,7 +212,7 @@ proc appendLinearTimeline*(tl: var v3, src: ptr string, mi: MediaInfo,
       tl.v[0].add videoClip
 
   var layerIdx = 0
-  for i in mi.decodableAudio:  # warns once per appended source
+  for i in mi.decodableAudio: # warns once per appended source
     if tl.a.len <= layerIdx:
       tl.a.add @[]
       tl.langs.add mi.a[i].lang
