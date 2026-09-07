@@ -4,7 +4,7 @@
  -
 
 ## Features
- -
+ - `info --json` now reports `decodable` for every audio stream: whether this build has a decoder for it.
 
 ## Performance
  -
