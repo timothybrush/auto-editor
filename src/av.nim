@@ -322,6 +322,21 @@ proc resetDiscards*(container: InputContainer) =
   for i in 0 ..< container.formatContext.nb_streams.int:
     container.formatContext.streams[i].discardLevel = AVDISCARD_DEFAULT
 
+var decodeErrors*: int
+  ## Packets dropped by `decode`/`videoPipeline` since the process started.
+  ## Non-zero means the analysis has holes in it: the result is usable but no
+  ## longer a faithful reading of the source, so callers must not cache it, and
+  ## `levels` reports it to the app by exiting non-zero.
+
+proc noteDecodeError*(msg: string) {.raises: [].} =
+  ## Tolerate a bad packet instead of killing the run. A single corrupt packet
+  ## 60% into a 54-minute recording used to abort the whole analysis, and a
+  ## caller reading our stdout saw a clean prefix with no way to tell it was
+  ## short. Warn once, then only count, so a badly damaged file stays readable.
+  inc decodeErrors
+  if decodeErrors == 1:
+    warning &"{msg} (skipping packet; further decode errors are only counted)"
+
 iterator decode*(container: InputContainer, index: cint, codecCtx: ptr AVCodecContext,
     frame: ptr AVFrame): ptr AVFrame =
   var ret: cint
@@ -337,16 +352,23 @@ iterator decode*(container: InputContainer, index: cint, codecCtx: ptr AVCodecCo
     if packet.stream_index == index:
       ret = avcodec_send_packet(codecCtx, packet)
       if ret < 0 and ret != AVERROR_EAGAIN:
-        error &"Error sending packet to decoder: {av_err2str(ret)}"
+        noteDecodeError &"Error sending packet to decoder: {av_err2str(ret)}"
+      else:
+        while true:
+          ret = avcodec_receive_frame(codecCtx, frame)
+          if ret == AVERROR_EAGAIN or ret == AVERROR_EOF:
+            break
+          elif ret < 0:
+            noteDecodeError &"Error receiving frame from decoder: {av_err2str(ret)}"
+            break
 
-      while true:
-        ret = avcodec_receive_frame(codecCtx, frame)
-        if ret == AVERROR_EAGAIN or ret == AVERROR_EOF:
-          break
-        elif ret < 0:
-          error &"Error receiving frame from decoder: {av_err2str(ret)}"
+          yield frame
 
-        yield frame
+  # Drain what the decoder still holds after the last packet. Without this every
+  # analysis stops a frame or two short of the real end of the stream.
+  discard avcodec_send_packet(codecCtx, nil)
+  while avcodec_receive_frame(codecCtx, frame) == 0:
+    yield frame
 
 iterator flushDecode*(container: InputContainer, index: cint,
     codecCtx: ptr AVCodecContext, frame: ptr AVFrame): ptr AVFrame =
