@@ -277,5 +277,14 @@ proc main*(strArgs: seq[string]) =
     for value in values:
       echo (if value: "1" else: "0")
 
-  if not noCache and editMethod notin ["subtitle", "word", "regex"]:
+  # Holes in the reading must not be cached, or every later run serves them back
+  # as genuine silence/stillness.
+  if not noCache and decodeErrors == 0 and
+      editMethod notin ["subtitle", "word", "regex"]:
     writeCache(data, tb, inputFile, editMethod, cacheArgs)
+
+  # The values above are already on stdout and are the best we could read. Exit
+  # non-zero anyway: a consumer that got a short stream needs to know it is
+  # short, and has no other way to tell.
+  if decodeErrors > 0:
+    error &"Could not decode {decodeErrors} packet(s); levels are incomplete."

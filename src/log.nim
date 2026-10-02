@@ -152,8 +152,11 @@ proc conwrite*(msg: string) {.raises: [].} =
       else:
         let columns = terminalWidth()
         let buffer: string = " ".repeat(max(0, columns - msg.len - 3))
-        stdout.write("  " & msg & buffer & "\r")
-      stdout.flushFile()
+        # stderr, not stdout: `levels`, `waveform` and `--export v1 -o -` put
+        # their data on stdout, and a progress-line clear mixed into it is
+        # indistinguishable from a blank line in that data.
+        stderr.write("  " & msg & buffer & "\r")
+      stderr.flushFile()
     except IOError:
       discard
 

@@ -187,5 +187,9 @@ proc main*(strArgs: seq[string]) =
     echo "@offset 0"
   echo ""
 
-  if not windowed and not noCache:
+  # As in `levels`: a reading taken over skipped packets must not be cached.
+  # Unlike `levels` this does not exit non-zero -- a waveform lane is display
+  # only, and losing it entirely over one bad packet is worse than drawing a
+  # slightly short one.
+  if not windowed and not noCache and decodeErrors == 0:
     writeCache(flat, cacheTb, inputFile, "waveform", cacheArgs)
