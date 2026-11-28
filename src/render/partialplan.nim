@@ -172,10 +172,21 @@ proc scanGops(input: InputContainer, stream: ptr AVStream, fps: AVRational,
   result.keyframes.setLen(write)
 
 proc partialLosslessPlan*(output: OutputContainer, tl: v3, args: mainArgs,
-    video: VideoSettings, codecId: AVCodecID): seq[SmartSpan] =
-  if args.noPartialLossless or video.scale != 1.0 or video.pixFmt != "" or
-      video.profile != "":
+    video: VideoSettings, codecId: AVCodecID):
+    tuple[spans: seq[SmartSpan], keyframes: seq[int64]] =
+  ## The spans to copy and to encode, with the source's keyframes, or no spans
+  ## when the render has to encode every frame.
+  if args.noPartialLossless:
     return
+
+  # A render that could have copied and didn't is otherwise only slower.
+  template skip(reason: string) =
+    debug "Skipping " & codecId.codecLabel & " partial-lossless rendering: " & reason
+    return
+
+  if video.scale != 1.0: skip "the output is scaled"
+  if video.pixFmt != "": skip "a pixel format was asked for"
+  if video.profile != "": skip "a profile was asked for"
 
   let encoder = initCodec(video.codec)
   if encoder == nil or encoder.id != codecId:
@@ -183,24 +194,27 @@ proc partialLosslessPlan*(output: OutputContainer, tl: v3, args: mainArgs,
   # The web build's WebCodecs encoders (h264_web and the like) don't splice
   # into copied packets: their output decodes as garbage between copied spans.
   if ($encoder.name).endsWith("_web"):
-    return
+    skip &"{encoder.name} can't splice into copied packets"
   let formatName = $output.formatCtx.oformat.name
   if not codecId.supportsContainer(formatName):
-    return
+    skip &"{formatName} can't hold a mix of copied and encoded packets"
   if tl.v.len != 1 or tl.v[0].len == 0:
-    return
+    skip "the timeline isn't a single video layer"
 
   let source = tl.v[0][0].src
   if source == nil:
-    return
+    skip "the first clip has no source"
   var expectedStart = 0'i64
   for clip in tl.v[0]:
-    if clip.src != source or clip.stream != 0 or clip.start != expectedStart or
-        not tl.effects[clip.effects].isEmpty:
-      return
+    if clip.src != source or clip.stream != 0:
+      skip "the clips aren't all of one source's first video stream"
+    if clip.start != expectedStart:
+      skip "the clips leave a gap or overlap"
+    if not tl.effects[clip.effects].isEmpty:
+      skip "a clip has effects"
     expectedStart = clip.start + clip.dur
   if expectedStart != tl.len:
-    return
+    skip "the clips end before the timeline does"
 
   var input = try: av.open(source[])
               except IOError: return
@@ -209,34 +223,40 @@ proc partialLosslessPlan*(output: OutputContainer, tl: v3, args: mainArgs,
     return
 
   let stream = input.video[0]
-  if stream.codecpar.codec_id != codecId or
-      stream.codecpar.width != tl.res[0] or
-      stream.codecpar.height != tl.res[1] or
-      not input.supportsStream(stream, encoder, codecId) or
-      not stream.avg_frame_rate.isValid or stream.avg_frame_rate != tl.tb:
-    return
+  if stream.codecpar.codec_id != codecId:
+    skip "the source is " & $avcodec_get_name(stream.codecpar.codec_id)
+  if stream.codecpar.width != tl.res[0] or stream.codecpar.height != tl.res[1]:
+    skip &"the source is {stream.codecpar.width}x{stream.codecpar.height}, " &
+      &"the timeline {tl.res[0]}x{tl.res[1]}"
+  if not input.supportsStream(stream, encoder, codecId):
+    skip "the source's pixel format or headers can't be matched by the encoder"
+  # Packets are placed by rounding their time to a timeline frame, which only
+  # gives each its own frame when the two rates are the same.
+  if not stream.avg_frame_rate.isValid or stream.avg_frame_rate != tl.tb:
+    skip &"the source averages {stream.avg_frame_rate} fps, the timeline is {tl.tb}"
 
   # Re-encoded frames are deinterlaced, so copying an interlaced source's GOPs
   # would leave its output interlaced or not depending on where cuts fall.
   if stream.codecpar.field_order notin [0.cint, 1]:
-    return
+    skip "the source is interlaced"
 
   let (keyframes, sourceEnd) = scanGops(input, stream, tl.tb, codecId)
   for clip in tl.v[0]:
     if clip.offset < 0 or clip.offset >= sourceEnd or
         clip.offset + clip.dur > sourceEnd + 1:
-      return
+      skip "a clip reaches outside the source's frames"
 
   let plan = smartRenderPlan(tl.v[0], keyframes, sourceEnd)
   let stats = smartPlanStats(plan)
   let averageGop = averageGopFrames(keyframes, sourceEnd)
-  if not smartPlanIsWorthwhile(stats, tl.len, sourceEnd, averageGop):
+  if not smartPlanIsWorthwhile(stats, tl.len, sourceEnd, averageGop,
+      $encoder.name):
     let label = codecId.codecLabel
     debug &"Skipping {label} partial-lossless rendering: copying " &
       &"{stats.copiedFrames}/{tl.len} frames across {plan.len} spans " &
       &"would not offset {stats.encodeRuns} encoder runs"
     return
-  return plan
+  return (plan, keyframes)
 
 proc initPartialEncoder(video: VideoSettings, par: ptr AVCodecParameters,
     frameTb, fps: AVRational, codecId: AVCodecID): ptr AVCodecContext =
@@ -252,7 +272,18 @@ proc initPartialEncoder(video: VideoSettings, par: ptr AVCodecParameters,
   encoder.color_trc = par.color_trc
   encoder.colorspace = par.color_space
   encoder.profile = par.profile
-  encoder.bit_rate = max(par.bit_rate * 6 div 5, 1_000_000)
+  # FFmpeg's default is one thread, which only encoders with their own
+  # default (libx264) override. The web build's workers come from a fixed
+  # pool, so it keeps the default.
+  when not defined(emscripten):
+    encoder.thread_count = 0
+  # A little over the source's rate holds re-encoded frames up beside copied
+  # ones. A low or unknown rate is left to the encoder's own quality target,
+  # as a full render's is: a run is short and opens on an I frame, which a
+  # small average starves, and a fixed rate in its place gives a screen
+  # recording many times the bits it had.
+  let matched = par.bit_rate * 6 div 5
+  encoder.bit_rate = (if matched >= 1_000_000: matched else: 0)
   if codecId.isNalCodec:
     # VideoToolbox reorders a B-pyramid two deep whatever it's asked for, and
     # FFmpeg's wrapper shifts its DTS by one, so a B-frame lands with its DTS
@@ -280,7 +311,7 @@ func holdsFrames(tb, frameTb: AVRational): bool =
   (frameTb.num.int64 * tb.den.int64) mod (frameTb.den.int64 * tb.num.int64) == 0
 
 proc makePartialLossless*(output: var OutputContainer, tl: v3, video: VideoSettings,
-    spans: seq[SmartSpan], codecId: AVCodecID):
+    spans: seq[SmartSpan], keyframes: seq[int64], codecId: AVCodecID):
     (ptr AVStream, iterator(): (ptr AVPacket, int64)) =
   let label = codecId.codecLabel
   let isNal = codecId.isNalCodec
@@ -450,6 +481,8 @@ proc makePartialLossless*(output: var OutputContainer, tl: v3, video: VideoSetti
         receive(encodedPacket)
       if sentFrame != nil: inc sent
 
+    # The last source frame the decoder gave, or -1 when it has to seek.
+    var decodedTo = -1'i64
     # The frames to encode for run `genRun`, one at a time.
     var genRun = 0
     var gen: iterator(): ptr AVFrame = nil
@@ -459,10 +492,15 @@ proc makePartialLossless*(output: var OutputContainer, tl: v3, video: VideoSetti
         var firstFrameInRun = true
         for fedSpan in runFirst[genRun] .. runLast[genRun]:
           let span = spans[fedSpan]
-          encInput.seekToKeyBefore(encStream,
-            av_rescale_q(span.srcStart, frameTb, encStream.time_base) +
-            encInput.startPts(encStream))
-          avcodec_flush_buffers(decoder)
+          # A seek decodes again from the keyframe before the span. A decoder
+          # already past that keyframe, as after a cut within one GOP, has
+          # only the frames between left to go through.
+          let key = keyframes[max(upperBound(keyframes, span.srcStart) - 1, 0)]
+          if decodedTo < 0 or decodedTo >= span.srcStart or key > decodedTo + 1:
+            encInput.seekToKeyBefore(encStream,
+              av_rescale_q(span.srcStart, frameTb, encStream.time_base) +
+              encInput.startPts(encStream))
+            avcodec_flush_buffers(decoder)
           var count = 0'i64
           var lastDecoded: ptr AVFrame = nil
           var flushed = false
@@ -475,6 +513,7 @@ proc makePartialLossless*(output: var OutputContainer, tl: v3, video: VideoSetti
               let sourceFrame = int64(round((frame.time(encStream.time_base) -
                 float(encInput.startPts(encStream) * encStream.time_base)) *
                 float(tl.tb)))
+              decodedTo = sourceFrame
               if sourceFrame < span.srcStart:
                 continue
               # A WebCodecs decoder hands over whatever layout the browser
@@ -521,6 +560,8 @@ proc makePartialLossless*(output: var OutputContainer, tl: v3, video: VideoSetti
               av_frame_free(addr src)
           if lastDecoded != nil:
             av_frame_free(addr lastDecoded)
+          # A drained decoder gives nothing more until it's flushed.
+          if flushed: decodedTo = -1
 
     # Send one more frame to the encoder, starting the next run if none is
     # under way, and finishing the run when it has no frames left.
